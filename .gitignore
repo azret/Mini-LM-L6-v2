@@ -6,3 +6,8 @@
 /__pycache__
 GPT.ckpt
 Mini-LM-L6-v2.ckpt
+/www/.vs/www
+/www/packages/Microsoft.CodeDom.Providers.DotNetCompilerPlatform.2.0.1
+/www/Bin
+/py/__pycache__
+/MiniLM-L6-v2.ckpt

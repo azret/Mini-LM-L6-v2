@@ -20,11 +20,8 @@ class Config:
     bias: bool = True
     eps: float = 1e-12
 
-class MiniLML6v2(_Model):
-    r""" Mini-LM-L6-v2 """
-
-    class MiniLML6v2Attention(torch.nn.Module):
-        r""" Mini-LM-L6-v2 Attention """
+class BertModel(_Model):
+    class BertAttention(torch.nn.Module):
         def __init__(
             self,
             *,
@@ -55,8 +52,7 @@ class MiniLML6v2(_Model):
             y = self.norm(a + x)
             return y, w
 
-    class MiniLML6v2Block(torch.nn.Module):
-        r""" Mini-LM-L6-v2 Block """
+    class BertLayer(torch.nn.Module):
         def __init__(
             self,
             *,
@@ -68,7 +64,7 @@ class MiniLML6v2(_Model):
             drop: float
         ):
             super().__init__()
-            self.attention = MiniLML6v2.MiniLML6v2Attention(
+            self.attention = BertModel.BertAttention(
                 eps=eps,
                 dim=dim,
                 heads=heads,
@@ -115,7 +111,7 @@ class MiniLML6v2(_Model):
         self.encoder = torch.nn.ModuleDict(dict(
             layer = torch.nn.ModuleList(
                 [
-                    MiniLML6v2.MiniLML6v2Block(
+                    BertModel.BertLayer(
                         dim = cfg.dim,
                         eps = cfg.eps,
                         heads = cfg.heads,
@@ -160,7 +156,7 @@ class MiniLML6v2(_Model):
         """ Load model from pre-trained 'sentence-transformers/all-MiniLM-L6-v2'. """
         print("> Downloading pre-trained 'sentence-transformers/all-MiniLM-L6-v2'...", end="")
         try:
-            from transformers import BertModel, BertTokenizer
+            from transformers import BertModel as _BertModel, BertTokenizer
             stdout = sys.stdout
             stderr = sys.stderr
             with open(os.devnull, "w") as devnull:
@@ -168,7 +164,7 @@ class MiniLML6v2(_Model):
                 sys.stderr = devnull
                 try:
                     encoding = BertTokenizer.from_pretrained(pretrained_model_name_or_path)
-                    hugging_face_model = BertModel.from_pretrained(pretrained_model_name_or_path)
+                    hugging_face_model = _BertModel.from_pretrained(pretrained_model_name_or_path)
                     cfg = Config()
                     cfg.dim = 384
                     cfg.multiplier = 4
@@ -179,7 +175,7 @@ class MiniLML6v2(_Model):
                     cfg.type_vocab_size = 2
                     cfg.bias = True
                     cfg.eps = 1e-12
-                    model = MiniLML6v2(cfg)
+                    model = BertModel(cfg)
                     model.apply(model._init_weights)
                     cls._adopt_from_hugging_face(model, hugging_face_model)
                     model.eval()
@@ -251,7 +247,7 @@ class MiniLML6v2(_Model):
                 dst_parameters[dst_k].copy_(src_parameters[src_k])
 
     @classmethod
-    def from_checkpoint(cls, ckpt: Union[str, os.PathLike], pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = "sentence-transformers/all-MiniLM-L6-v2"):
+    def load(cls, ckpt: Union[str, os.PathLike], pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = "sentence-transformers/all-MiniLM-L6-v2"):
         """ Load model from local checkpoint. """
         print(f"> Loading checkpoint '{ckpt}'...", end="")
         try:
@@ -273,9 +269,9 @@ class MiniLML6v2(_Model):
                     cfg.type_vocab_size = 2
                     cfg.bias = True
                     cfg.eps = 1e-12
-                    model = MiniLML6v2(cfg)
+                    model = BertModel(cfg)
                     model.apply(model._init_weights)
-                    model.load(ckpt)
+                    model._load(ckpt)
                     model.eval()
                     return model, encoding
                 finally:
@@ -284,17 +280,26 @@ class MiniLML6v2(_Model):
         finally:
             print("\n")
 
+def _model():
+    r""" Factory """
+    ckpt = os.path.join(os.path.dirname(__file__), "MiniLM-L6-v2.ckpt")
+    if not os.path.exists(ckpt):
+        model, encoding =  BertModel.download()
+        model._save(ckpt)
+    model, encoding =  BertModel.load(ckpt)
+    return model, encoding
+
 if __name__ == "__main__":
     import argparse
     print(f"> python = {sys.version}")
     print(f"> numpy = {numpy.version.version}")
     print(f"> torch = {torch.version.__version__}")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default='Mini-LM-L6-v2')
+    parser.add_argument("--model", type=str, default='MiniLM-L6-v2')
     parser.add_argument("--device", type=str, default="auto")
     args, _ = parser.parse_known_args()
     assert args.model in [
-        'Mini-LM-L6-v2'
+        'MiniLM-L6-v2'
     ]
     if args.device == "auto":
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -308,11 +313,7 @@ if __name__ == "__main__":
             torch.cuda.manual_seed(65537)
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-        ckpt = os.path.join(os.path.dirname(__file__), "Mini-LM-L6-v2.ckpt")
-        if not os.path.exists(ckpt):
-            model, encoding =  MiniLML6v2.download()
-            model.save(ckpt)
-        model, encoding =  MiniLML6v2.from_checkpoint(ckpt)
+        model, encoding =  _model()
         model.to(args.device)
         print(f"\x1b[38;2;{114};{204};{232}m", end="")
         print(str(model))
@@ -348,13 +349,13 @@ if __name__ == "__main__":
                 return (token_embeddings * mask_expanded).sum(1) / mask_expanded.sum(1)
             sentence_embeddings = mean_pooling(token_embeddings, encoded['attention_mask'])
             sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
-            print(sentence_embeddings.shape)
-            print(sentence_embeddings)
-        from sentence_transformers import SentenceTransformer
-        _SentenceTransformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-        sentence_embeddings = _SentenceTransformer.encode(sentences)
-        print(sentence_embeddings.shape)
-        print(sentence_embeddings)
+            # print(sentence_embeddings.shape)
+            # print(sentence_embeddings)
+        # from sentence_transformers import SentenceTransformer
+        # _SentenceTransformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        # sentence_embeddings = _SentenceTransformer.encode(sentences)
+        # print(sentence_embeddings.shape)
+        # print(sentence_embeddings)
         print()
     except Exception as e:
         print()

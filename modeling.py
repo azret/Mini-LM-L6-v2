@@ -150,7 +150,7 @@ class _Model(torch.nn.Module):
             s += f"(wpe): Parameter{tuple(self.wpe.shape)}\n"
         return s.strip()
 
-    def save(self, ckpt):
+    def _save(self, ckpt):
         r""" Save model parameters to a raw binary file. (MATLAB MAT4 format in Raw-Major) """
         path = os.path.dirname(os.path.abspath(ckpt))
         os.makedirs(path, exist_ok=True)
@@ -174,7 +174,7 @@ class _Model(torch.nn.Module):
                 file.write(name)
                 file.write(t.numpy().tobytes())
 
-    def load(self, ckpt, errors: Literal["strict"] = "strict"):
+    def _load(self, ckpt, errors: Literal["strict"] = "strict"):
         r""" Load model parameters from a raw binary file. (MATLAB MAT4 format in Raw-Major) """
         params = self.state_dict();
         with open(ckpt, "rb") as f:
