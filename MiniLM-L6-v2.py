@@ -1,10 +1,14 @@
+# This is a Karpathy-style single-model single-file implementation for BertModel.
+
 import math, os, sys, time
 
 import numpy, torch
 
 from modeling import _Model, MultiHeadSelfAttention, MLP
+from modeling import _save_state, _load_state
+from modeling import _strip_whitespaces, _save_vocab, _load_vocab
 
-from typing import Callable, Literal, Optional, Tuple, Union
+from typing import Callable, Literal, Optional, Tuple, Union, List, Dict
 
 from dataclasses import dataclass
 
@@ -19,6 +23,19 @@ class Config:
     depth: int = 6
     bias: bool = True
     eps: float = 1e-12
+
+class BertEncoding:
+    def __init__(self, vocab_or_file):
+        from transformers import BertTokenizer as _BertTokenizer
+        self.tokenizer = _BertTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+    def __call__(self, text):
+        encoded = self.tokenizer(
+            text,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )
+        return encoded
 
 class BertModel(_Model):
     class BertAttention(torch.nn.Module):
@@ -152,18 +169,17 @@ class BertModel(_Model):
         return x
 
     @classmethod
-    def download(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = "sentence-transformers/all-MiniLM-L6-v2"):
+    def download_from_hugging_face(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = "sentence-transformers/all-MiniLM-L6-v2"):
         """ Load model from pre-trained 'sentence-transformers/all-MiniLM-L6-v2'. """
         print("> Downloading pre-trained 'sentence-transformers/all-MiniLM-L6-v2'...", end="")
         try:
-            from transformers import BertModel as _BertModel, BertTokenizer
+            from transformers import BertModel as _BertModel, BertTokenizer as _BertTokenizer
             stdout = sys.stdout
             stderr = sys.stderr
             with open(os.devnull, "w") as devnull:
                 sys.stdout = devnull
                 sys.stderr = devnull
                 try:
-                    encoding = BertTokenizer.from_pretrained(pretrained_model_name_or_path)
                     hugging_face_model = _BertModel.from_pretrained(pretrained_model_name_or_path)
                     cfg = Config()
                     cfg.dim = 384
@@ -179,7 +195,7 @@ class BertModel(_Model):
                     model.apply(model._init_weights)
                     cls._adopt_from_hugging_face(model, hugging_face_model)
                     model.eval()
-                    return model, encoding
+                    return model
                 finally:
                     sys.stdout = stdout
                     sys.stderr = stderr
@@ -247,18 +263,16 @@ class BertModel(_Model):
                 dst_parameters[dst_k].copy_(src_parameters[src_k])
 
     @classmethod
-    def load(cls, ckpt: Union[str, os.PathLike], pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = "sentence-transformers/all-MiniLM-L6-v2"):
+    def load_from_checkpoint(cls, ckpt: Union[str, os.PathLike], pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = "sentence-transformers/all-MiniLM-L6-v2"):
         """ Load model from local checkpoint. """
         print(f"> Loading checkpoint '{ckpt}'...", end="")
         try:
-            from transformers import BertTokenizer
             stdout = sys.stdout
             stderr = sys.stderr
             with open(os.devnull, "w") as devnull:
                 sys.stdout = devnull
                 sys.stderr = devnull
                 try:
-                    encoding = BertTokenizer.from_pretrained(pretrained_model_name_or_path)
                     cfg = Config()
                     cfg.dim = 384
                     cfg.multiplier = 4
@@ -271,25 +285,66 @@ class BertModel(_Model):
                     cfg.eps = 1e-12
                     model = BertModel(cfg)
                     model.apply(model._init_weights)
-                    model._load(ckpt)
+                    _load_state(
+                        model,
+                        ckpt)
                     model.eval()
-                    return model, encoding
+                    return model
                 finally:
                     sys.stdout = stdout
                     sys.stderr = stderr
         finally:
             print("\n", end="")
 
-def _model():
+def _LOAD_MODEL_BY_NAME_(name, download: bool | None = None):
     r""" Factory """
-    ckpt = os.path.join(os.path.dirname(__file__), "MiniLM-L6-v2.ckpt")
+    assert name == 'MiniLM-L6-v2'
+    from pathlib import Path
+    ckpt = str(Path(__file__).with_suffix(".ckpt"))
+    if not os.path.exists(ckpt) and download:
+        model = BertModel.download_from_hugging_face()
+        _save_state(
+            model,
+            ckpt)
     if not os.path.exists(ckpt):
-        model, encoding =  BertModel.download()
-        model._save(ckpt)
-    model, encoding =  BertModel.load(ckpt)
+        return None, None
+    model = BertModel.load_from_checkpoint(ckpt)
+    encoding = BertEncoding(None)
     return model, encoding
 
 if __name__ == "__main__":
+    sentences = [
+        "The quick brown fox jumps over the lazy dog.",
+        "FastAPI is handling this request on Azure right now.",
+        "Latency tests should include both warm and cold runs.",
+        "Embeddings let us compare text by semantic similarity.",
+        "This is a short sentence.",
+        "This is a slightly longer sentence that should still fit comfortably under the max token limit.",
+        "🚀 Unicode emojis should not break tokenization.",
+        "Caffè con panna is delicious.",
+        "こんにちは、これは埋め込みのテストです。",
+        "    The model should ignore leading and trailing whitespace.    ",
+        "HTTP 200 is good; HTTP 404 is still useful for latency baselines.",
+        "Azure App Service adds a bit of overhead compared to localhost.",
+        "OpenAI’s endpoint is usually between 200ms and 400ms for small payloads.",
+        "Please summarize the following paragraph in one sentence.",
+        "The capital of France is Paris.",
+        "1 2 3 4 5 6 7 8 9 10",
+        "Special characters: !@#$%^&*()_+[]{}|;':\",./<>?",
+        "Here is some code: `def hello(name): return f\"Hello, {name}\"`.",
+        "Large language models can generate and embed text.",
+        "Running multiple concurrent requests should hit the worker pool.",
+        "This sentence is intentionally verbose so that we can check how the model handles inputs that approach the maximum text length parameter configured on the server.",
+        "The weather today is cloudy with a chance of performance regressions.",
+        "Please check CPU usage and memory consumption during this batch.",
+        "Similar sentence to number 4: embeddings allow us to measure how close two pieces of text are.",
+        "Totally unrelated topic: penguins live in the Southern Hemisphere.",
+        "Another unrelated topic: GPU utilization on Azure can vary.",
+        "lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+        "Multiline\ntext\nshould\nstill\nwork.",
+        "I wonder how fast this request will be when four workers are busy.",
+        "End of test batch.",
+    ]
     import argparse
     print(f"> python = {sys.version}")
     print(f"> numpy = {numpy.version.version}")
@@ -313,8 +368,11 @@ if __name__ == "__main__":
             torch.cuda.manual_seed(65537)
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-        model, encoding =  _model()
+        model, encoding =  _LOAD_MODEL_BY_NAME_(args.model, download=True)
+        if model is None or encoding is None:
+            raise ValueError(f"Model '{args.model}' is not available.")
         model.to(args.device)
+        assert model.training is False
         print(f"\x1b[38;2;{114};{204};{232}m", end="")
         print(str(model))
         print(f"\x1b[0m", end="")
@@ -326,18 +384,8 @@ if __name__ == "__main__":
         except:
             pass
         print(end="\n\n")
-        sentences = [
-            "The weather is lovely today.",
-            "It's so sunny outside!",
-            "He drove to the stadium.",
-        ]
-        encoded = encoding(
-            sentences,
-            padding=True,
-            truncation=True,
-            return_tensors="pt"
-        )
-        with torch.no_grad():
+        encoded = encoding(sentences)
+        with torch.inference_mode():
             token_embeddings = model(
                 input_ids = encoded.data['input_ids'], 
                 token_type_ids = encoded.data['token_type_ids'],
@@ -347,15 +395,17 @@ if __name__ == "__main__":
                 token_embeddings = token_embeddings.cpu()
                 mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
                 return (token_embeddings * mask_expanded).sum(1) / mask_expanded.sum(1)
-            sentence_embeddings = mean_pooling(token_embeddings, encoded['attention_mask'])
-            sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
-            # print(sentence_embeddings.shape)
-            # print(sentence_embeddings)
-        # from sentence_transformers import SentenceTransformer
-        # _SentenceTransformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-        # sentence_embeddings = _SentenceTransformer.encode(sentences)
-        # print(sentence_embeddings.shape)
-        # print(sentence_embeddings)
+            sentence_embeddings0 = mean_pooling(token_embeddings, encoded['attention_mask'])
+            sentence_embeddings0 = torch.nn.functional.normalize(sentence_embeddings0, p=2, dim=1)
+        from sentence_transformers import SentenceTransformer
+        _SentenceTransformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        sentence_embeddings1 = _SentenceTransformer.encode(sentences)
+        assert sentence_embeddings0.shape == sentence_embeddings1.shape
+        assert numpy.allclose(
+            sentence_embeddings0.cpu().numpy(),
+            sentence_embeddings1,
+            atol=1e-5
+        )
         print()
     except Exception as e:
         print()

@@ -1,31 +1,31 @@
-# The model that is being hosted
-
-MODEL = "MiniLM-L6-v2"
-
 import math, os, importlib, sys, time
 
 from typing import Any, List, Optional, Union
 
-JWT_SECRET = os.getenv("APP_JWT_SECRET", "{CHANGEME}")
+# The model being hosted by this node
+
+MODEL = os.getenv("MODEL", "MiniLM-L6-v2").strip()
+print(f"> MODEL={MODEL}")
+DEVICE = os.getenv("DEVICE", "auto").strip().lower()
+if DEVICE not in ["auto", "cpu", "cuda"]:
+    raise ValueError(f"Invalid environment variable 'DEVICE={DEVICE}'. Must be 'auto', 'cpu' or 'cuda'.")
+print(f"> DEVICE={DEVICE}")
+
+JWT_SECRET = os.getenv("APP_JWT_SECRET", "")
+if not JWT_SECRET or JWT_SECRET == len(""):
+    print("Environment variable 'JWT_SECRET' is not set.")
 JWT_ALG = os.getenv("APP_JWT_ALG", "HS256")
 JWT_ISS = os.getenv("APP_JWT_ISS", "")
 JWT_LEEWAY_SECONDS = int(os.getenv("APP_JWT_LEEWAY", "30"))
 
-# Number of workers in the thead pool.
-
-NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
-
 # Max batch size supported.
-
 MAX_BATCH = 128
-
 # Max text length supported.
-
 MAX_TEXT = 1024
 
 import torch
 
-def _resolve(
+def _load_from_check_point(
     name
 ) -> torch.nn.Module:
     import hashlib, importlib
@@ -56,65 +56,86 @@ def _resolve(
     spec = importlib.util.spec_from_file_location(md5(name), path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module._model()
+    model, encoding = module._LOAD_MODEL_BY_NAME_(name)
+    model.eval()
+    return model, encoding
 
 import asyncio
+
+r""" The loadbalncing here is not state of the art. We could just serv on a single worker since
+        the model does not have any state. """
 
 class Worker:
     model: Any
     encoding: Any
+    def _inference(
+        self,
+        inputs: List[str]
+    ) -> List[List[float]]:
+        if self.model is None or self.encoding is None:
+             raise HTTPException(status_code=500, detail="Not available")
+        inputs = [t.strip() for t in inputs]
+        encoded = self.encoding(
+            inputs
+        )
+        with torch.inference_mode():
+            attention_mask = encoded["attention_mask"]
+            # forward pass
+            token_embeddings = self.model(
+                input_ids=encoded.data["input_ids"],
+                token_type_ids=encoded.data["token_type_ids"],
+                attention_mask=attention_mask,
+            )
+            token_embeddings = token_embeddings.cpu()
+            attention_mask = attention_mask.cpu()
+            # mean pooling over non-masked tokens
+            mask_expanded = attention_mask.unsqueeze(-1).expand(
+                token_embeddings.size()).float()
+            token_embeddings = (token_embeddings * mask_expanded).sum(1) / mask_expanded.sum(1)
+            # L2 normalize
+            token_embeddings = torch.nn.functional.normalize(
+                token_embeddings,
+                p=2,
+                dim=1
+            )
+            return token_embeddings.tolist()
+
 class WorkerPool:
-    def __init__(self, num):
-        self.num = num
+    def __init__(self):
         self.workers: List[Worker] = []
         self.queue: asyncio.Queue[Worker] = asyncio.Queue()
     async def initialize(self):
-        for _id in range(self.num):
-            model, encoding = _resolve(MODEL)
+        torch.manual_seed(65537)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(65537)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        device = DEVICE
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if not torch.cuda.is_available():
+            device = "cpu"
+        assert device in ["cpu", "cuda"]
+        num = torch.cuda.device_count() if device == "cuda" and torch.cuda.is_available() else 4
+        self.workers = []
+        self.queue = asyncio.Queue()
+        for _id in range(num):
+            model, encoding = _load_from_check_point(MODEL)
+            if model is None or encoding is None:
+                print(f"> _load_from_check_point('{MODEL}') failed.", file=sys.stder)
+            if device == "cuda":
+                model.to(device= f"cuda:{_id}")
+                print(f"> device=cuda:{_id}")
             worker = Worker()
             worker.model = model;
             worker.encoding = encoding;
             self.workers.append(worker)
             await self.queue.put(worker)
-        print(f"> All {self.num} workers initialized!")
+        print(f"> All {num} workers initialized!")
     async def acquire(self) -> Worker:
         return await self.queue.get()
     async def release(self, worker: Worker):
         await self.queue.put(worker)
-
-def _inference(
-    worker,
-    inputs: List[str]
-) -> List[List[float]]:
-    encoding = worker.encoding
-    model = worker.model
-    inputs = [t.strip() for t in inputs]
-    encoded = encoding(
-        inputs,
-        padding=True,
-        truncation=True,
-        return_tensors="pt",
-    )
-    with torch.inference_mode():
-        attention_mask = encoded["attention_mask"]
-        token_embeddings = model(
-            input_ids=encoded.data["input_ids"],
-            token_type_ids=encoded.data["token_type_ids"],
-            attention_mask=attention_mask,
-        )
-        token_embeddings = token_embeddings.cpu()
-        attention_mask = attention_mask.cpu()
-        # mean pooling over valid tokens
-        mask_expanded = attention_mask.unsqueeze(-1).expand(
-            token_embeddings.size()).float()
-        token_embeddings = (token_embeddings * mask_expanded).sum(1) / mask_expanded.sum(1)
-        # L2 normalize each row
-        token_embeddings = torch.nn.functional.normalize(
-            token_embeddings,
-            p=2,
-            dim=1
-        )
-        return token_embeddings.tolist()
 
 import jwt
 
@@ -150,14 +171,14 @@ def verify_jwt_token(token: str) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Loading model workers...")
-    app.state.WorkerPool = WorkerPool(num=NUM_WORKERS)
+    app.state.WorkerPool = WorkerPool()
     await app.state.WorkerPool.initialize()
     worker = await app.state.WorkerPool.acquire()
     try:
-        embeddings = _inference(worker=worker, inputs=["Warmup inference"])
+        embeddings = worker._inference(inputs=["Warmup inference"])
     finally:
         await app.state.WorkerPool.release(worker)
-    print(f"Ready...\r\n")
+    print(f"Ready...")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -237,7 +258,7 @@ async def embeddings(payload: EmbeddingRequest, principal: dict = Security(verif
     worker = await app.state.WorkerPool.acquire()
     try:
         t0 = time.time()
-        embeddings = _inference(worker, inputs)
+        embeddings = worker._inference(inputs)
     finally:
         await app.state.WorkerPool.release(worker)
     for i, v in enumerate(embeddings):

@@ -1,21 +1,10 @@
-r"""
-`An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`
-    - https://arxiv.org/abs/2010.11929
-`Masked Autoencoders Are Scalable Vision Learners`
-    - https://arxiv.org/abs/2111.06377
-`Quantifying Attention Flow in Transformers. Samira Abnar, Willem Zuidema (2020)`
-    - https://arxiv.org/abs/2005.00928
-`Understanding and Improving the Role of Projection Head in Self-Supervised Learning`
-    - https://arxiv.org/pdf/2212.11491
-"""
-
-import os, math, numbers, numpy, torch
+import os, math, numbers, collections, logging, numpy, torch
 
 import warnings
 
 from io import StringIO
 
-from typing import Callable, Optional, Literal, Union, Tuple
+from typing import Callable, Optional, Literal, Union, Tuple, Iterator, Dict, List, Any
 
 def adamw(model, weight_decay=1e-2, lr=1e-3, betas=(0.9, 0.999)):
     r""" Creates an AdamW optimizer with separate parameter groups for weight decay and no weight decay. """
@@ -47,13 +36,6 @@ def rsqrt(x: numpy.ndarray, eps: float = 1e-6) -> numpy.ndarray:
     return 1.0 / numpy.sqrt(x + eps)
 
 def rmsnorm(x: Union[torch.Tensor|numpy.ndarray], eps: float = 1e-6) -> Union[torch.Tensor|numpy.ndarray]:
-    """Root Mean Square Normalization of the input array or tensor.
-    Example:
-        >>> import numpy as np
-        >>> x = np.array([[1.0, 2.0, 3.0]])
-        >>> rmsnorm(x)
-        array([[0.26726124, 0.53452248, 0.80178373]])
-    """
     if isinstance(x, numpy.ndarray):
         return x * rsqrt(numpy.mean(numpy.square(x), axis=-1, keepdims=True), eps)
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
@@ -149,53 +131,6 @@ class _Model(torch.nn.Module):
         if hasattr(self, 'wpe') and isinstance(self.wpe, torch.nn.Parameter):
             s += f"(wpe): Parameter{tuple(self.wpe.shape)}\n"
         return s.strip()
-
-    def _save(self, ckpt):
-        r""" Save model parameters to a raw binary file. (MATLAB MAT4 format in Raw-Major) """
-        path = os.path.dirname(os.path.abspath(ckpt))
-        os.makedirs(path, exist_ok=True)
-        params = self.state_dict();
-        with open(ckpt, "wb") as file:
-            for k in params:
-                t = params[k].detach().float().cpu()
-                name = k.encode('utf-8')
-                header = torch.zeros(5, dtype=torch.int32)
-                header[0] = 10 # type
-                if len(t.shape) == 2:
-                    header[1] = t.size(1) # mrows
-                    header[2] = t.size(0) # cols
-                else:
-                    header[1] = 1 # mrows
-                    header[2] = t.numel() # cols
-                header[3] = 0 # imagf
-                header[4] = len(name) # dwNameLength
-                assert header[4] <= 63
-                file.write(header.cpu().numpy().tobytes()) # header
-                file.write(name)
-                file.write(t.numpy().tobytes())
-
-    def _load(self, ckpt, errors: Literal["strict"] = "strict"):
-        r""" Load model parameters from a raw binary file. (MATLAB MAT4 format in Raw-Major) """
-        params = self.state_dict();
-        with open(ckpt, "rb") as f:
-            for k in params:
-                header = numpy.frombuffer(f.read(5 * 4), dtype=numpy.int32)
-                assert len(header) == 5
-                assert header[0] == 10
-                assert header[1] > 0 and header[1] <= 0xFFFF
-                assert header[2] > 0 and header[2] <= 0xFFFF
-                assert header[3] == 0
-                assert header[4] > 0 and header[4] <= 63
-                name = f.read(header[4])
-                assert len(name) == header[4]
-                name = name.decode('utf-8').strip("\n\r \t\0")
-                if name != k:
-                    s = f"Parameter name mismatch '{k}' expected, but got '{name}'"
-                    warnings.warn(s, RuntimeWarning)
-                data = numpy.frombuffer(f.read(header[1] * header[2] * 4), dtype=numpy.float32)
-                assert len(data) == header[1] * header[2]
-                with torch.no_grad():
-                    params[k].copy_(torch.tensor(data).view(params[k].shape))
 
 class MLP(torch.nn.Module):
     r"""
@@ -396,3 +331,127 @@ class MultiHeadSelfAttentionBlock(torch.nn.Module):
         y = self.mlp(x)
         x = x + y
         return x, a
+
+# https://github.com/meta-llama/llama-models/blob/0e0b8c519242d5833d8c11bffc1232b77ad7f301/models/llama4/tokenizer.py#L251
+
+def _split_whitespaces_or_nonwhitespaces(s: str, max_consecutive_slice_len: int) -> Iterator[str]:
+    """
+    Splits the string `s` so that each substring contains no more than `max_consecutive_slice_len`
+    consecutive whitespaces or consecutive non-whitespaces.
+    """
+    current_slice_len = 0
+    current_slice_is_space = s[0].isspace() if len(s) > 0 else False
+    slice_start = 0
+    for i in range(len(s)):
+        is_now_space = s[i].isspace()
+        if current_slice_is_space ^ is_now_space:
+            current_slice_len = 1
+            current_slice_is_space = is_now_space
+        else:
+            current_slice_len += 1
+            if current_slice_len > max_consecutive_slice_len:
+                yield s[slice_start:i]
+                slice_start = i
+                current_slice_len = 1
+    yield s[slice_start:]
+
+from typing import Iterator
+
+def _strip_whitespaces(s: str) -> Iterator[str]:
+    """
+    Yield non-empty whitespace-separated tokens from the input string.
+    """
+    if not s:
+        return
+    length = len(s)
+    i = 0
+    while i < length:
+        # skip any leading whitespace
+        while i < length and s[i].isspace():
+            i += 1
+        if i >= length:
+            break
+        start = i
+        # advance until next whitespace or end
+        while i < length and not s[i].isspace():
+            i += 1
+        # yield the token we found
+        yield s[start:i]
+
+# https://github.com/huggingface/transformers/blob/e8a6eb3304033fdd9346fe3b3293309fe50de238/src/transformers/models/bert/tokenization_bert.py#L31
+
+def _load_vocab(
+    vocab_file
+) -> collections.OrderedDict:
+    """Loads a vocabulary file into a dictionary."""
+    vocab = collections.OrderedDict()
+    with open(vocab_file, "r", encoding="utf-8") as reader:
+        tokens = reader.readlines()
+        for index, token in enumerate(tokens):
+            token = token.rstrip("\n")
+            vocab[token] = index
+    return vocab
+
+# https://github.com/huggingface/transformers/blob/e8a6eb3304033fdd9346fe3b3293309fe50de238/src/transformers/models/bert/tokenization_bert.py#L239
+
+def _save_vocab(vocab: collections.OrderedDict, vocab_file) -> tuple[str]:
+    index = 0
+    with open(vocab_file, "w", encoding="utf-8") as writer:
+        for token, token_index in sorted(vocab.items(), key=lambda kv: kv[1]):
+            if index != token_index:
+                print(
+                    f"Saving vocabulary to {vocab_file}: vocabulary indices are not consecutive."
+                    " Please check that the vocabulary is not corrupted!"
+                )
+                index = token_index
+            writer.write(token + "\n")
+            index += 1
+
+# We save the model parameters in a raw binary file using MATLAB MAT4 format in Raw-Major.
+
+def _save_state(self: torch.nn.Module, ckpt):
+    r""" Save model parameters to a raw binary file. (MATLAB MAT4 format in Raw-Major) """
+    path = os.path.dirname(os.path.abspath(ckpt))
+    os.makedirs(path, exist_ok=True)
+    params = self.state_dict();
+    with open(ckpt, "wb") as file:
+        for k in params:
+            t = params[k].detach().float().cpu()
+            name = k.encode('utf-8')
+            header = torch.zeros(5, dtype=torch.int32)
+            header[0] = 10 # type
+            if len(t.shape) == 2:
+                header[1] = t.size(1) # mrows
+                header[2] = t.size(0) # cols
+            else:
+                header[1] = 1 # mrows
+                header[2] = t.numel() # cols
+            header[3] = 0 # imagf
+            header[4] = len(name) # dwNameLength
+            assert header[4] <= 63
+            file.write(header.cpu().numpy().tobytes()) # header
+            file.write(name)
+            file.write(t.numpy().tobytes())
+
+def _load_state(self: torch.nn.Module, ckpt, errors: Literal["strict"] = "strict"):
+    r""" Load model parameters from a raw binary file. (MATLAB MAT4 format in Raw-Major) """
+    params = self.state_dict();
+    with open(ckpt, "rb") as f:
+        for k in params:
+            header = numpy.frombuffer(f.read(5 * 4), dtype=numpy.int32)
+            assert len(header) == 5
+            assert header[0] == 10
+            assert header[1] > 0 and header[1] <= 0xFFFF
+            assert header[2] > 0 and header[2] <= 0xFFFF
+            assert header[3] == 0
+            assert header[4] > 0 and header[4] <= 63
+            name = f.read(header[4])
+            assert len(name) == header[4]
+            name = name.decode('utf-8').strip("\n\r \t\0")
+            if name != k:
+                s = f"Parameter name mismatch '{k}' expected, but got '{name}'"
+                warnings.warn(s, RuntimeWarning)
+            data = numpy.frombuffer(f.read(header[1] * header[2] * 4), dtype=numpy.float32)
+            assert len(data) == header[1] * header[2]
+            with torch.no_grad():
+                params[k].copy_(torch.tensor(data).view(params[k].shape))

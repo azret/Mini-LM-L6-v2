@@ -1,22 +1,23 @@
-import os, json, requests, time, jwt
+import sys, os, json, requests, time, jwt
 
 BASE_URL = "http://127.0.0.1:8000"
 # BASE_URL = "https://minilm-l6-v2-fsdhaggedqfrddhg.eastus-01.azurewebsites.net"
 # BASE_URL = "https://api.openai.com"
 
-JWT_SECRET = os.getenv("APP_JWT_SECRET", "{CHANGEME}")
+JWT_SECRET = os.getenv("APP_JWT_SECRET", "")
+
+if not JWT_SECRET or JWT_SECRET == len(""):
+    print("Environment variable 'JWT_SECRET' is not set.", file=sys.stderr)
+
 JWT_ALG = os.getenv("APP_JWT_ALG", "HS256")
 JWT_ISS = os.getenv("APP_JWT_ISS", "")
 JWT_LEEWAY_SECONDS = int(os.getenv("APP_JWT_LEEWAY", "30"))
 
 def issue_token(
     subject: str,
-    expires_in_seconds: int = 365 * 24 * 60 * 60, # 1 year
+    expires_in_seconds: int = -1,
     extra_claims: dict | None = None,
 ) -> str:
-    r"""
-    Issue a long-lived JWT (default: 1 year).
-    """
     now = int(time.time())
     payload = {
         "sub": subject,
@@ -25,6 +26,12 @@ def issue_token(
     }
     if JWT_ISS:
         payload["iss"] = JWT_ISS
+    r"""
+    Issue a long-lived JWT (default: 1 year).
+    """
+    if expires_in_seconds < 0:
+        expires_in_seconds = 365 * 24 * 60 * 60 # 1 year
+    payload["exp"] = now + expires_in_seconds
     if extra_claims:
         payload.update(extra_claims)
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
