@@ -28,24 +28,36 @@ def issue_token(
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
     return token
 
-def main():
-    token = issue_token(subject="client.py")
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def do_one_request(token: str, idx: int) -> float:
+    t0 = time.time()
     url = f"{BASE_URL}/v1/embeddings"
     payload = {
         "model": "MiniLM-L6-v2",
-        "input": "The quick brown fox"
+        "input": "The quick brown fox",
     }
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     resp = requests.post(url, json=payload, headers=headers)
-    print("status:", resp.status_code)
-    try:
-        data = resp.json()
-        print(json.dumps(data, indent=2))
-    except Exception:
-        print(resp.text)
+    data = resp.json()
+    elapsed = time.time() - t0
+    return (idx, resp.status_code, elapsed)
+
+def loadtest():
+    token = issue_token(subject="client.py")
+    total_requests = 1000 # how many requests in total
+    concurrency = 4 # how many to run at the same time
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [
+            pool.submit(do_one_request, token, i)
+            for i in range(total_requests)
+        ]
+        for fut in as_completed(futures):
+            idx, status, elapsed = fut.result()
+            print(f"[{idx:03d}] status={status} latency={elapsed*1000:.2f}ms")
 
 if __name__ == "__main__":
-    main()
+    loadtest()

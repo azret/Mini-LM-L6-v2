@@ -1,11 +1,15 @@
 import math, os, importlib, sys, time
 
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 JWT_SECRET = os.getenv("APP_JWT_SECRET", "{CHANGEME}")
 JWT_ALG = os.getenv("APP_JWT_ALG", "HS256")
 JWT_ISS = os.getenv("APP_JWT_ISS", "")
 JWT_LEEWAY_SECONDS = int(os.getenv("APP_JWT_LEEWAY", "30"))
+
+# Number of model workers
+
+NUM_WORKERS = 4
 
 # Max batch size supported
 
@@ -14,14 +18,6 @@ MAX_BATCH = 128
 # Max text length supported
 
 MAX_TEXT = 1024
-
-_ALL_MODELS_ = {
-    "MiniLM-L6-v2": {
-        "dim": 384,
-        "description": "MiniLM-L6-v2 embedding model",
-        "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
-    }
-}
 
 import torch
 
@@ -58,15 +54,36 @@ def _resolve(
     spec.loader.exec_module(module)
     return module._model()
 
-for m in _ALL_MODELS_:
-    _ALL_MODELS_[m]['model'], _ALL_MODELS_[m]['encoding'] = _resolve(m)
+import asyncio
 
-def inference(
-    model: str,
+class Worker:
+    model: Any
+    encoding: Any
+class WorkerPool:
+    def __init__(self, num):
+        self.num = num
+        self.workers: List[Worker] = []
+        self.queue: asyncio.Queue[Worker] = asyncio.Queue()
+    async def initialize(self):
+        for _id in range(self.num):
+            model, encoding = _resolve("MiniLM-L6-v2")
+            worker = Worker()
+            worker.model = model;
+            worker.encoding = encoding;
+            self.workers.append(worker)
+            await self.queue.put(worker)
+        print(f"> All {self.num} workers initialized!")
+    async def acquire(self) -> Worker:
+        return await self.queue.get()
+    async def release(self, worker: Worker):
+        await self.queue.put(worker)
+
+def _inference(
+    worker,
     inputs: List[str]
 ) -> List[List[float]]:
-    encoding = _ALL_MODELS_[model]["encoding"]
-    model = _ALL_MODELS_[model]["model"]
+    encoding = worker.encoding
+    model = worker.model
     inputs = [t.strip() for t in inputs]
     encoded = encoding(
         inputs,
@@ -97,6 +114,13 @@ def inference(
 
 import jwt
 
+from fastapi import FastAPI, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from pydantic import BaseModel
+
+from contextlib import asynccontextmanager
+
 def verify_jwt_token(token: str) -> dict:
     r"""
     Verify signature, exp (always), and issuer (if set).
@@ -119,12 +143,20 @@ def verify_jwt_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-from fastapi import FastAPI, HTTPException, Security
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Loading model workers...")
+    app.state.WorkerPool = WorkerPool(num=NUM_WORKERS)
+    await app.state.WorkerPool.initialize()
+    worker = await app.state.WorkerPool.acquire()
+    try:
+        embeddings = _inference(worker=worker, inputs=["Warmup inference"])
+    finally:
+        await app.state.WorkerPool.release(worker)
+    print(f"Ready...\r\n")
+    yield
 
-from pydantic import BaseModel
-
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -142,32 +174,6 @@ r""" /health """
 )
 def health():
     return {"status": "ok"}
-
-r""" /ready """
-
-@app.get(
-    "/ready"
-)
-def ready():
-    for name, meta in _ALL_MODELS_.items():
-        if "model" not in meta or "encoding" not in meta:
-            raise HTTPException(status_code=503, detail=f"Model '{name}' not ready")
-    return {"status": "ready"}
-
-r""" /info """
-
-@app.get("/info")
-def info(principal: dict = Security(verify_principal)):
-    return {
-        "models": {
-            name: {
-                "dim": meta.get("dim"),
-                "description": meta.get("description"),
-                "url": meta.get("url"),
-            }
-            for name, meta in _ALL_MODELS_.items()
-        },
-    }
 
 r""" /v1/embeddings """
 
@@ -189,14 +195,17 @@ class EmbeddingResponse(BaseModel):
     usage: Optional[int] = None
     object: str = "list"
     data: List[EmbeddingData]
+    model_config = {
+            "exclude_none": True
+        }
 
 @app.post(
     "/v1/embeddings",
     response_model = EmbeddingResponse,
     response_model_exclude_none = True
 )
-def embeddings(payload: EmbeddingRequest):
-    if payload.model not in _ALL_MODELS_:
+async def embeddings(payload: EmbeddingRequest, principal: dict = Security(verify_principal)):
+    if payload.model != "MiniLM-L6-v2":
         raise HTTPException(
             status_code=400, 
             detail=f"The specified model '{payload.model}' is not supported."
@@ -205,7 +214,7 @@ def embeddings(payload: EmbeddingRequest):
         raise HTTPException(
             status_code=400,
             detail=f"The specified encoding format '{payload.encoding_format}' is not supported.")
-    if payload.dim != _ALL_MODELS_[payload.model]["dim"]:
+    if payload.dim != 384:
         raise HTTPException(
             status_code=400,
             detail=f"The specified dimension '{payload.dim}' is not supported.")
@@ -221,7 +230,12 @@ def embeddings(payload: EmbeddingRequest):
         if len(t) > MAX_TEXT:
             raise HTTPException(status_code=400, detail=f"Input too long. Max: {MAX_TEXT}")
     data: List[EmbeddingData] = []
-    embeddings = inference(payload.model, inputs)
+    worker = await app.state.WorkerPool.acquire()
+    try:
+        t0 = time.time()
+        embeddings = _inference(worker, inputs)
+    finally:
+        await app.state.WorkerPool.release(worker)
     for i, v in enumerate(embeddings):
         data.append(
             EmbeddingData(
@@ -229,13 +243,12 @@ def embeddings(payload: EmbeddingRequest):
                 embedding=v,
             )
         )
+    print(f"> _inference: {int((time.time() - t0) * 1000)}ms")
     return EmbeddingResponse(
-        data=data,
         model=payload.model,
+        data=data
     )
 
 if __name__ == "__main__":
-    embeddings = inference("MiniLM-L6-v2", 
-              ["The quick brown fox",
-              "jumped over a lazy dog"]
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -184,7 +184,7 @@ class BertModel(_Model):
                     sys.stdout = stdout
                     sys.stderr = stderr
         finally:
-            print("\n")
+            print("\n", end="")
 
     @staticmethod
     def _adopt_from_hugging_face(dst, src):
@@ -278,7 +278,7 @@ class BertModel(_Model):
                     sys.stdout = stdout
                     sys.stderr = stderr
         finally:
-            print("\n")
+            print("\n", end="")
 
 def _model():
     r""" Factory """

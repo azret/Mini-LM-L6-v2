@@ -116,3 +116,25 @@ curl -X POST http://localhost:8000/v1/embeddings \
       ]
 }
 ```
+
+## Azure
+
+TODO: Add Azure deployment instructions. This is the most complicated part. Azure is not an easy thing to deploy to.
+
+Environment Variable:
+
+```
+SCM_DO_BUILD_DURING_DEPLOYMENT=true
+```
+
+Startup Command:
+
+```bash
+python -m uvicorn runserver:app --host 0.0.0.0 --port 8000
+```
+
+Deployment Center -> Publish Files:
+
+
+Upload the entire repository as a ZIP file and deploy it to Azure App Service.
+
