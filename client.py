@@ -1,7 +1,6 @@
 import sys, os, json, requests, time, jwt, numpy
 
 BASE_URL = "http://127.0.0.1:8000"
-BASE_URL = "https://minilm-l6-v2-fsdhaggedqfrddhg.eastus-01.azurewebsites.net"
 # BASE_URL = "https://api.openai.com"
 
 JWT_SECRET = os.getenv("APP_JWT_SECRET", "")
