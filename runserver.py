@@ -1,3 +1,7 @@
+# The model that is being hosted
+
+MODEL = "MiniLM-L6-v2"
+
 import math, os, importlib, sys, time
 
 from typing import Any, List, Optional, Union
@@ -7,15 +11,15 @@ JWT_ALG = os.getenv("APP_JWT_ALG", "HS256")
 JWT_ISS = os.getenv("APP_JWT_ISS", "")
 JWT_LEEWAY_SECONDS = int(os.getenv("APP_JWT_LEEWAY", "30"))
 
-# Number of model workers
+# Number of workers in the thead pool.
 
-NUM_WORKERS = 4
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 
-# Max batch size supported
+# Max batch size supported.
 
 MAX_BATCH = 128
 
-# Max text length supported
+# Max text length supported.
 
 MAX_TEXT = 1024
 
@@ -66,7 +70,7 @@ class WorkerPool:
         self.queue: asyncio.Queue[Worker] = asyncio.Queue()
     async def initialize(self):
         for _id in range(self.num):
-            model, encoding = _resolve("MiniLM-L6-v2")
+            model, encoding = _resolve(MODEL)
             worker = Worker()
             worker.model = model;
             worker.encoding = encoding;
@@ -205,7 +209,7 @@ class EmbeddingResponse(BaseModel):
     response_model_exclude_none = True
 )
 async def embeddings(payload: EmbeddingRequest, principal: dict = Security(verify_principal)):
-    if payload.model != "MiniLM-L6-v2":
+    if payload.model != MODEL:
         raise HTTPException(
             status_code=400, 
             detail=f"The specified model '{payload.model}' is not supported."

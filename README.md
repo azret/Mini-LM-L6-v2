@@ -2,7 +2,11 @@
 
 ## Overview
 
-This repository provides a self-contained implementation of the [**all-MiniLM-L6-v2**](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), designed for generating high-quality sentence embeddings. The model is optimized for efficiency and performance, making it suitable for various natural language processing tasks such as semantic search, clustering, and classification.
+This repository provides a self-contained implementation of the [**all-MiniLM-L6-v2**](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) inference, designed for generating quality sentence embeddings.
+
+The goal is to not rely on OpenAI or other third-party services due to cost, latency, privacy, and data security concerns.
+
+This is especially important for applications that require processing sensitive information or need to operate in environments with strict data governance policies.
 
 ## Dependencies
 
@@ -117,7 +121,7 @@ curl -X POST http://localhost:8000/v1/embeddings \
 }
 ```
 
-## Deployment on Azure
+## Deployment on Azure (CPU)
 
 ***11/9/2025***
 

@@ -1,5 +1,7 @@
 # The original Open AI model - https://github.com/openai/gpt-2 here for debugging purposes.
 
+# This is a Karpathy-style single-file implementation. Though some comming base classes are abstracted to modeling.py
+
 import math, os, sys, time
 
 import numpy, torch, tiktoken
